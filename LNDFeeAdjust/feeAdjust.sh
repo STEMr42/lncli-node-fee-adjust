@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 
+########################################################################################
+#   LN fee policy update for multi-node setup
+#   -Requires LNCLI, JQ, BC
+#   -Requires macaroon, rpc server address, tls cert for each root node
+#   -Set individual policy for Root node interlinks, LSPs (preffered rate partners),
+#       Leaf nodes (single peer), and default for others
+########################################################################################
 
 #get configs
 rootNodes=$(cat rootnodes.json)
@@ -27,7 +34,7 @@ echo "otherNodeppm = $otherNodeppm"
 baseFee=$(cat rates.json | jq -r '.rates.base')
 echo "baseFee = $baseFee"
 
-# --base_fee_msat value  the base fee in milli-satoshis that will be charged for each forwarded HTLC, regardless of payment size (default: 0)
+# --base_fee_msat value  the base fee in milli-satoshis that will be charged for each forwarded HTLC, regardless of payment size
 # --fee_rate value  the fee rate that will be charged proportionally based on the value of each forwarded HTLC, 
 #       the lowest possible rate is 0 with a granularity of 0.000001 (millionths)
 
@@ -50,24 +57,15 @@ for node in $(jq '.nodes | keys | .[]' <<< ${rootNodes[@]}); do
     echo "tlscert path = $tlscertpath"
     
     #get channel list
-    chanData=$(if [ -z $tlscertpath ]; then #tlscert = ""
-            lncli --rpcserver $socket --macaroonpath $macaroonpath --tlscertpath "" listchannels
-        else
-            lncli --rpcserver $socket --macaroonpath $macaroonpath --tlscertpath $tlscertpath listchannels
-        fi)
+    chanData=$(lncli --rpcserver $socket --macaroonpath $macaroonpath --tlscertpath $tlscertpath listchannels)
     numChannels=$(jq -r '.channels | length' <<< ${chanData[@]})
     echo "numChannels = $numChannels"
 
     #get feereport
-    feeData=$(if [ -z $tlscertpath ]; then #tlscert = ""
-        lncli --rpcserver $socket --macaroonpath $macaroonpath --tlscertpath "" feereport
-    else
-        lncli --rpcserver $socket --macaroonpath $macaroonpath --tlscertpath $tlscertpath feereport
-        fi)
+    feeData=$(lncli --rpcserver $socket --macaroonpath $macaroonpath --tlscertpath $tlscertpath feereport)
     echo "num fee data = $(jq -r '.channel_fees | length' <<< ${feeData[@]})"
     #echo $(jq '.channel_fees' <<< ${feeData[@]})
-  
-    
+      
     #loop through channels
     for channel in $(jq '.channels | keys | .[]' <<< ${chanData[@]}); do
             echo "**********************************************************************************************"
@@ -96,13 +94,10 @@ for node in $(jq '.nodes | keys | .[]' <<< ${rootNodes[@]}); do
                 echo "rate check"
                 if [[ $bFee != $baseFee || $rFee != $rootNodeppm ]]; then
                     echo "setting root node fee $baseFee base $rootNodeRate rate"
- #comment out this if for testing
-                    if [ -z $tlscertpath ]; then #tlscert = ""
-                        lncli --rpcserver $socket --macaroonpath $macaroonpath --tlscertpath "" updatechanpolicy --time_lock_delta 40 --base_fee_msat 0 --fee_rate $rootNoodeRate --chan_point $chanPoint
-                    else
-                        lncli --rpcserver $socket --macaroonpath $macaroonpath --tlscertpath $tlscertpath updatechanpolicy --time_lock_delta 40 --base_fee_msat 0 --fee_rate $rootNodeRate --chan_point $chanPoint
-                    fi #finished lncli
- ###################
+ #comment this out for testing
+                lncli --rpcserver $socket --macaroonpath $macaroonpath --tlscertpath $tlscertpath updatechanpolicy \
+                --time_lock_delta 40 --base_fee_msat 0 --fee_rate $rootNodeRate --chan_point $chanPoint
+ ################################
                 fi #finished fee check
                 continue #finished root node check, move to next channel
             fi #finished root node check
@@ -116,36 +111,25 @@ for node in $(jq '.nodes | keys | .[]' <<< ${rootNodes[@]}); do
                 echo "rate check"
                 if [[ $bFee != $baseFee || $rFee != $lspNodeppm ]]; then
                     echo "setting LSP node fee $baseFee base $lspNodeRate rate"
- #comment out this if for testing
-                    if [ -z $tlscertpath ]; then #tlscert = ""
-                        lncli --rpcserver $socket --macaroonpath $macaroonpath --tlscertpath "" updatechanpolicy --time_lock_delta 40 --base_fee_msat 0 --fee_rate $lspNodeRate --chan_point $chanPoint
-                    else
-                        lncli --rpcserver $socket --macaroonpath $macaroonpath --tlscertpath $tlscertpath updatechanpolicy --time_lock_delta 40 --base_fee_msat 0 --fee_rate $lspNodeRate --chan_point $chanPoint
-                    fi #finished lncli
- ###################
+ #comment this out for testing
+                lncli --rpcserver $socket --macaroonpath $macaroonpath --tlscertpath $tlscertpath updatechanpolicy \
+                --time_lock_delta 40 --base_fee_msat 0 --fee_rate $lspNodeRate --chan_point $chanPoint
+ ###############################
                 fi #finished fee check
                 continue #finished root node check, move to next channel
             fi #finished lsp node check
     echo "not lsp"
+ #comment this out to skip leaf node - this check requires the most time
             #look for leaf node (single peer only!)
-            #get node info for pub key
-            peerNodeData=$(if [ -z $tlscertpath ]; then #tlscert = ""
-                lncli --rpcserver $socket --macaroonpath $macaroonpath --tlscertpath "" getnodeinfo --pub_key $remotePubkey
-            else
-                lncli --rpcserver $socket --macaroonpath $macaroonpath --tlscertpath $tlscertpath getnodeinfo --pub_key $remotePubkey
-            fi)
-            peerNumChannels=$(jq -r --arg remotePubkey "$remotePubkey" '.num_channels' <<< ${peerNodeData[@]})
+            #get node info for current remote pub key
+            peerNodeData=$(lncli --rpcserver $socket --macaroonpath $macaroonpath --tlscertpath $tlscertpath getnodeinfo --pub_key $remotePubkey)
+            peerNumChannels=$(jq '.num_channels' <<< ${peerNodeData[@]})
             echo "peerNumChannels = $peerNumChannels"
-            #check if current root node is only connected peer
             #get peer num channels w/ root node
-            peerChanData=$(if [ -z $tlscertpath ]; then #tlscert = ""
-                lncli --rpcserver $socket --macaroonpath $macaroonpath --tlscertpath "" listchannels --peer $remotePubkey
-            else
-                lncli --rpcserver $socket --macaroonpath $macaroonpath --tlscertpath $tlscertpath listchannels --peer $remotePubkey
-            fi)
-            nodeNumChannels=$(jq -r '.channels | length' <<< ${peerChanData[@]})
+            nodeNumChannels=$(jq -r --arg remotePubkey "$remotePubkey" '[.channels[].remote_pubkey | select(. == $remotePubkey)] | length' <<< ${chanData[@]});
             echo "nodeNumChannels = $nodeNumChannels"
-            #If peer num channels == our node num channels to node, consider leaf node - these are node that can't forward
+
+            #If peer num channels == our node num channels to peer, consider leaf node - these are sngle peer nodes that can't forward
             if [ $peerNumChannels -eq $nodeNumChannels ]; then #found leaf node
                 echo "found Leaf node"
                 #if not set right, updatepolicy
@@ -153,30 +137,25 @@ for node in $(jq '.nodes | keys | .[]' <<< ${rootNodes[@]}); do
                 testv=0
                 if [[ $bFee != $baseFee || $rFee != $leafNodeppm ]]; then
                     echo "setting leaf node fee $baseFee base $leafNodeRate rate"
- #comment out this if for testing
-                    if [ -z $tlscertpath ]; then #tlscert = ""
-                        lncli --rpcserver $socket --macaroonpath $macaroonpath --tlscertpath "" updatechanpolicy --time_lock_delta 40 --base_fee_msat 0 --fee_rate $leafNodeRate --chan_point $chanPoint
-                    else
-                        lncli --rpcserver $socket --macaroonpath $macaroonpath --tlscertpath $tlscertpath updatechanpolicy --time_lock_delta 40 --base_fee_msat 0 --fee_rate $leafNodeRate --chan_point $chanPoint
-                    fi #finished lncli
- ####################
+ #comment this out for testing
+                lncli --rpcserver $socket --macaroonpath $macaroonpath --tlscertpath $tlscertpath updatechanpolicy \
+                --time_lock_delta 40 --base_fee_msat 0 --fee_rate $leafNodeRate --chan_point $chanPoint
+ ###############################
                 fi #finished fee check
                 continue #finished root node check, move to next channel
             fi #finished single channel check
     echo "not leaf"
-            #If here, set other node rate
-                echo "found other node"
-                echo "rate check"
-                #if fees not set right, updatepolicy
-                if [[ $bFee != $baseFee || $rFee != $otherNodeppm ]]; then
-                    echo "setting other node fee $baseFee base $otherNodeRate rate"
-#comment out this if for testing
-                    if [ -z $tlscertpath ]; then #tlscert = ""
-                        lncli --rpcserver $socket --macaroonpath $macaroonpath --tlscertpath "" updatechanpolicy --time_lock_delta 40 --base_fee_msat 0 --fee_rate $otherNodeRate --chan_point $chanPoint
-                    else
-                        lncli --rpcserver $socket --macaroonpath $macaroonpath --tlscertpath $tlscertpath updatechanpolicy --time_lock_delta 40 --base_fee_msat 0 --fee_rate $otherNodeRate --chan_point $chanPoint
-                    fi #finished lncli
-#####################
+########################################################################################### end leaf node
+            #no matches found, set other node rate
+            echo "found other node"
+            echo "rate check"
+            #if fees not set right, updatepolicy
+            if [[ $bFee != $baseFee || $rFee != $otherNodeppm ]]; then
+                echo "setting other node fee $baseFee base $otherNodeRate rate"
+#comment this out for testing
+                lncli --rpcserver $socket --macaroonpath $macaroonpath --tlscertpath $tlscertpath updatechanpolicy \
+                --time_lock_delta 40 --base_fee_msat 0 --fee_rate $otherNodeRate --chan_point $chanPoint
+###############################
                 fi #finished fee check
             
     done #finished channel loop
